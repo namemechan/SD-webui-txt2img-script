@@ -2,6 +2,7 @@ import gradio as gr
 import re
 from PIL import Image
 import pathlib
+import time
 
 import modules.scripts as scripts
 from modules import processing
@@ -13,8 +14,6 @@ from modules.shared import opts
 from modules.generation_parameters_copypaste import parse_generation_parameters
 from modules.extras import run_pnginfo
 
-# github repository -> https://github.com/thundaga/SD-webui-txt2img-script
-
 def int_convert(text: str) -> int:
     return int(text)
 
@@ -25,12 +24,9 @@ def boolean_convert(text: str) -> bool:
     return True if (text == "true") else False
 
 def hires_resize(p, parsed_text: dict):
-    # Fix the issue when the values doesn't exist
-    # Uses the default value (skip the reset part)
     if not ('Hires upscale' in parsed_text or parsed_text['Hires resize-1'] != 0 or parsed_text['Hires resize-2'] != 0):
         return p
 
-    # Reset hr_settings to avoid wrong settings
     p.hr_scale = None
     p.hr_resize_x = int(0)
     p.hr_resize_y = int(0)
@@ -56,45 +52,19 @@ def width_height(p, parsed_text: dict):
         p.height = int(parsed_text['Size-2'])
     return p
 
-def prompt_modifications(parsed_text: dict, front_tags: str, back_tags: str, remove_tags: str) -> str:
+def prompt_modifications(parsed_text: dict, find_text: str, replace_text: str, remove_text: str) -> str:
     prompt = parsed_text['Prompt']
 
-    if remove_tags:
-        remove_tags = remove_tags.strip("\n")
-        tags = [x.strip() for x in remove_tags.split(',')]
-        while("" in tags):
-            tags.remove("")
-        text = prompt
-
-        for tag in tags:
-            text = re.sub("\(\(" + tag + "\)\)|\(" + tag + ":.*?\)|<" + tag + ":.*?>|<" + tag + ">", "", text)
-            text = re.sub(r'\([^\(]*(%s)\S*\)' % tag, '', text)
-            text = re.sub(r'\[[^\[]*(%s)\S*\]' % tag, '', text)
-            text = re.sub(r'<[^<]*(%s)\S*>' % tag, '', text)
-            text = re.sub(r'\b' + tag + r'\b', '', text)
-
-        # remove consecutive comma patterns with a coma and space
-        pattern = re.compile(r'(,\s){2,}')
-        text = re.sub(pattern, ', ', text)
-
-        # remove final comma at start of prompt
-        text = text.replace(", ", "", 1)
-        prompt = text
-
-    if front_tags:
-        if front_tags.endswith(' ') == False and front_tags.endswith(',') == False:
-            front_tags = front_tags + ','
-        prompt = ''.join([front_tags, prompt])
-
-    if back_tags:
-        if back_tags.startswith(' ') == False and back_tags.startswith(',') == False:
-            back_tags = ',' + back_tags
-        prompt = ''.join([prompt, back_tags])
+    if find_text:
+        replace_text = replace_text or ''  # replace_text가 입력되지 않은 경우 공백으로 대체
+        prompt = re.sub(re.escape(find_text), replace_text, prompt)
+    
+    if remove_text:
+        prompt = re.sub(re.escape(remove_text), '', prompt)
+    
     return prompt
 
-# build valid txt and image files e.g (txt(utf-8),img(png)) into valid parsed dictionaries with metadata info 
 def build_file_list(file, tab_index: int, file_list: list[dict]) -> list[dict]:
-
     file = file.name if tab_index == 0 else file
     file_ext = pathlib.Path(file).suffix
     filename = pathlib.Path(file).stem
@@ -111,7 +81,6 @@ def build_file_list(file, tab_index: int, file_list: list[dict]) -> list[dict]:
 
     return file_list
 
-# key->(option name) : Values->tuple(metadata name, object property, property specific functions)
 prompt_options = {
     "Checkpoint":                       ("Model hash", None, override_settings),
     "Prompt":                           ("Prompt", "prompt", prompt_modifications),
@@ -133,16 +102,12 @@ prompt_options = {
 class Script(scripts.Script): 
 
     def title(self):
-
         return "Process PNG Metadata Info"
 
     def show(self, is_img2img):
-
         return not is_img2img
     
-    # set up ui to drag and drop the processed images and hold their file info
     def ui(self, is_img2img):
-
         tab_index = gr.State(value=0)
 
         with gr.Row().style(equal_height=False, variant='compact'):
@@ -156,25 +121,23 @@ class Script(scripts.Script):
                         output_dir = gr.Textbox(label="Output directory", **shared.hide_dirs, placeholder="Add output folder path or Leave blank to use default path.", elem_id="files_batch_output_dir")
                         filename_format = gr.Dropdown(label="Output filename format", choices=["Exact same filename as Input file", "Same filename as Input file but with extrat digits", "Standard - Simple digits"], value="Standard - Simple digits", info="The \"Exact same filename\" option might crash or overwrite file(s) if there are multiple files with the same name in the input directory", interactive=True, elem_id="files_batch_filename_type")
 
-                # CheckboxGroup with all parameters assignable from the input image (output is a list with the Name of the Checkbox checked ex: ["Checkpoint", "Prompt"]) 
                 options = gr.Dropdown(list(prompt_options.keys()), label="Assign from input image", info="Select are assigned from the input, the rest from UI", multiselect = True)
 
-                gr.HTML("<p style=\"margin-bottom:0.75em\">Optional tags to remove or add in front/end of a positive prompt on all images</p>")
-                front_tags = gr.Textbox(label="Tags to add at the front")
-                back_tags = gr.Textbox(label="Tags to add at the end")
-                remove_tags = gr.Textbox(label="Tags to remove")
+                gr.HTML("<p style=\"margin-bottom:0.75em\">Optional strings to find, replace, or remove in a positive prompt on all images</p>")
+                find_text = gr.Textbox(label="String to find")
+                replace_text = gr.Textbox(label="String to replace with (leave empty to replace with blank)")
+                remove_text = gr.Textbox(label="String to remove completely (leave empty to skip)")
+
+                delay_time = gr.Number(label="Delay time between images (seconds)", value=0, interactive=True)
 
         tab_batch.select(fn=lambda: 0, inputs=[], outputs=[tab_index])
         tab_batch_dir.select(fn=lambda: 1, inputs=[], outputs=[tab_index])
 
-        return [tab_index,upload_files,front_tags,back_tags,remove_tags,input_dir,output_dir,filename_format,options]
+        return [tab_index, upload_files, find_text, replace_text, remove_text, input_dir, output_dir, filename_format, options, delay_time]
 
-    # Files are open as images and the png info is set to the processed class for each iterated process
-    def run(self,p,tab_index,upload_files,front_tags,back_tags,remove_tags,input_dir,output_dir,filename_format,options):
-
+    def run(self, p, tab_index, upload_files, find_text, replace_text, remove_text, input_dir, output_dir, filename_format, options, delay_time):
         image_batch = []
 
-        # Operation based on current batch process tab
         if tab_index == 0:
             for file in upload_files:
                 image_batch = build_file_list(file, tab_index, image_batch)
@@ -200,12 +163,11 @@ class Script(scripts.Script):
             state.job = f"{state.job_no + 1} out of {state.job_count}"
 
             metadata, p_property, func = 0, 1, 2
-            # go through dictionary and commit uniform actions on similar object properties
             for option, tuple in prompt_options.items():
                 match option:
                     case "Prompt":
                         if option in options and  tuple[metadata] in parsed_text:
-                            setattr(p, tuple[p_property], tuple[func](parsed_text,front_tags,back_tags,remove_tags))
+                            setattr(p, tuple[p_property], tuple[func](parsed_text, find_text, replace_text, remove_text))
                     case "Width and Height":
                         if option in options:
                             p = tuple[func](p, parsed_text)
@@ -223,14 +185,11 @@ class Script(scripts.Script):
 
             proc = process_images(p)
 
-            # Reset Hires prompts (else the prompts of the first image will be used as Hires prompt for all the others)
             p.hr_prompt = ""
             p.hr_negative_prompt = ""
 
-            # Reset extra_generation_params as it stores the Hires resize and scale (Avoid having wrong info in the infotext)
             p.extra_generation_params = {}
 
-            # Modified directory to save generated images in cache
             if tab_index == 1 and output_dir != '':
                 match filename_format:
                     case "Exact same filename as Input file":
@@ -250,6 +209,8 @@ class Script(scripts.Script):
             all_prompts += proc.all_prompts
             infotexts += proc.infotexts
             
+            time.sleep(delay_time)  # 이미지 처리 후 지연 시간 추가
+
         processing.fix_seed(p)
 
         return Processed(p, images_list, p.seed, "", all_prompts=all_prompts, infotexts=infotexts)
